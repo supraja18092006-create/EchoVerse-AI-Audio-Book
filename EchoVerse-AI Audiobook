@@ -1,0 +1,116 @@
+""" EchoVerse – An AI-Powered Audiobook Creation Tool Single-file Streamlit app
+
+Features
+
+Paste text or upload .txt
+
+Tone-adaptive rewrite (Neutral / Suspenseful / Inspiring) via IBM watsonx.ai Granite
+
+Natural narration via IBM Text to Speech (Lisa / Michael / Allison)
+
+Side-by-side original vs rewritten
+
+Stream + download MP3
+
+
+Setup
+
+1. pip install -U streamlit ibm-watson ibm-watsonx-ai python-dotenv
+
+
+2. Create a .env file with: WATSONX_API_KEY=xxxxx WATSONX_PROJECT_ID=xxxxx WATSONX_REGION=us-south  # or your region TTS_API_KEY=xxxxx TTS_URL=https://api.us-south.text-to-speech.watson.cloud.ibm.com  # change if different
+
+
+3. Run: streamlit run app.py """
+
+
+
+import io import os from pathlib import Path from typing import Optional
+
+import streamlit as st from dotenv import load_dotenv
+
+--- IBM watsonx.ai (LLM) ---
+
+try: from ibm_watsonx_ai.foundation_models import Model from ibm_watsonx_ai.metanames import GenTextParamsMetaNames as GenParams from ibm_watsonx_ai import Credentials except Exception: Model = None
+
+--- IBM Text to Speech ---
+
+try: from ibm_watson import TextToSpeechV1 from ibm_cloud_sdk_core.authenticators import IAMAuthenticator except Exception: TextToSpeechV1 = None
+
+============================
+
+Config & Helpers
+
+============================
+
+load_dotenv(override=True)
+
+st.set_page_config(page_title="EchoVerse – AI Audiobook", page_icon="🎧", layout="wide")
+
+PRIMARY_TONES = ["Neutral", "Suspenseful", "Inspiring"] VOICE_MAP = { "Allison (en-US)": "en-US_AllisonV3Voice", "Michael (en-US)": "en-US_MichaelV3Voice", "Lisa (en-US)": "en-US_LisaV3Voice", }
+
+Cache model and TTS clients for performance
+
+@st.cache_resource(show_spinner=False) def get_watsonx_model(): api_key = os.getenv("WATSONX_API_KEY") project_id = os.getenv("WATSONX_PROJECT_ID") region = os.getenv("WATSONX_REGION", "us-south") if not (api_key and project_id): return None, "Missing WATSONX_API_KEY or WATSONX_PROJECT_ID in environment" if Model is None: return None, "ibm-watsonx-ai package not installed" creds = Credentials(api_key=api_key, url=f"https://{region}.ml.cloud.ibm.com") # Granite instruct model id (adjust if you have a specific version) model_id = "ibm/granite-13b-instruct-v2" params = { GenParams.DECODING_METHOD: "greedy", GenParams.MAX_NEW_TOKENS: 700, GenParams.TEMPERATURE: 0.2, GenParams.REPETITION_PENALTY: 1.05, } model = Model(model_id=model_id, params=params, credentials=creds, project_id=project_id) return model, None
+
+@st.cache_resource(show_spinner=False) def get_tts_client(): api_key = os.getenv("TTS_API_KEY") url = os.getenv("TTS_URL") if not (api_key and url): return None, "Missing TTS_API_KEY or TTS_URL in environment" if TextToSpeechV1 is None: return None, "ibm-watson package not installed" authenticator = IAMAuthenticator(api_key) tts = TextToSpeechV1(authenticator=authenticator) tts.set_service_url(url) return tts, None
+
+============================
+
+Core Functions
+
+============================
+
+def build_rewrite_prompt(tone: str, text: str) -> str: """Prompt chaining (compressed into one instruction with self-check).""" return ( "System: You are a precise, faithful rewriter.\n" "Task: Rewrite the user's text in the '{tone}' tone. Preserve factual meaning, names, and\n" "structure where reasonable. Improve clarity and flow. Aim for natural speech suitable for narration.\n" "Constraints: Do NOT omit key details. Avoid adding new facts. Keep roughly similar length.\n" "Output: Provide only the rewritten text with no preface.\n\n" f"User text:\n{text}" ).format(tone=tone)
+
+def watsonx_rewrite(model: Model, tone: str, text: str) -> str: prompt = build_rewrite_prompt(tone, text) try: out = model.generate(prompt=prompt) # SDK returns dict or string depending on version; normalize if isinstance(out, dict): # Try common keys cand = out.get("results") or out.get("generated_text") or out.get("completions") if isinstance(cand, list) and cand: txt = cand[0].get("generated_text") or cand[0].get("text") return txt.strip() if txt else "" elif isinstance(cand, str): return cand.strip() return str(out) return str(out).strip() except Exception as e: raise RuntimeError(f"LLM rewrite failed: {e}")
+
+def synthesize_mp3(tts: TextToSpeechV1, text: str, voice: str) -> bytes: try: response = tts.synthesize(text, voice=voice, accept="audio/mp3").get_result() return response.content except Exception as e: raise RuntimeError(f"TTS synthesis failed: {e}")
+
+============================
+
+UI
+
+============================
+
+with st.sidebar: st.title("🎧 EchoVerse") st.caption("AI‑powered, tone‑adaptive audiobook generator") st.markdown("---") tone = st.selectbox("Select tone", PRIMARY_TONES, index=0) voice_label = st.selectbox("Select voice", list(VOICE_MAP.keys()), index=0) voice = VOICE_MAP[voice_label] st.markdown("---") st.caption("Environment checks") model, model_err = get_watsonx_model() tts, tts_err = get_tts_client() st.success("watsonx.ai model ready ✅" if model and not model_err else f"LLM: {model_err or 'ready'}") st.success("Text-to-Speech ready ✅" if tts and not tts_err else f"TTS: {tts_err or 'ready'}")
+
+st.title("EchoVerse – An AI-Powered Audiobook Creation Tool") st.write("Convert your text into expressive narration with tone and voice control.")
+
+col_in, col_btn = st.columns([4, 1])
+
+with col_in: text_input = st.text_area( "Paste text here", height=220, placeholder="Paste or type text... (or upload a .txt file below)", ) uploaded = st.file_uploader("or Upload .txt", type=["txt"], accept_multiple_files=False) if uploaded is not None: try: text_input = uploaded.read().decode("utf-8", errors="ignore") except Exception: st.error("Could not decode file. Ensure it's UTF-8 text.")
+
+with col_btn: st.write("") st.write("") run = st.button("Generate ▶️", type="primary", use_container_width=True)
+
+if run: if not text_input or not text_input.strip(): st.warning("Please provide some text or upload a .txt file.") st.stop() if not model or model_err: st.error(f"LLM not configured: {model_err}") st.stop() if not tts or tts_err: st.error(f"TTS not configured: {tts_err}") st.stop()
+
+with st.spinner("Rewriting text with selected tone…"):
+    rewritten = watsonx_rewrite(model, tone, text_input.strip())
+
+if not rewritten:
+    st.error("Rewriting produced empty output. Try a shorter input or different tone.")
+    st.stop()
+
+c1, c2 = st.columns(2)
+with c1:
+    st.subheader("Original Text")
+    st.text_area("", text_input.strip(), height=320, key="orig", label_visibility="collapsed")
+with c2:
+    st.subheader(f"{tone} Version")
+    st.text_area("", rewritten, height=320, key="rewritten", label_visibility="collapsed")
+
+st.markdown("---")
+with st.spinner("Synthesizing narration…"):
+    mp3_bytes = synthesize_mp3(tts, rewritten, voice)
+
+st.subheader("Listen")
+st.audio(mp3_bytes, format="audio/mp3")
+
+fname = f"echoverse_{tone.lower()}_{voice.split('_')[2].lower()}.mp3"
+st.download_button("Download MP3", data=mp3_bytes, file_name=fname, mime="audio/mpeg")
+
+with st.expander("Prompt used (for debugging / reproducibility)"):
+    st.code(build_rewrite_prompt(tone, text_input.strip()))
+
+else: st.info("Paste text or upload a .txt file, choose tone & voice, then click Generate ▶️.")
